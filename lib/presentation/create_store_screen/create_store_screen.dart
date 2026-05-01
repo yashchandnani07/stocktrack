@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../theme/app_theme.dart';
+import '../../services/realtime_service.dart';
 import '../../services/store_service.dart';
 import '../../services/permission_service.dart';
 import '../../routes/app_routes.dart';
@@ -64,6 +67,14 @@ class _CreateStoreScreenState extends State<CreateStoreScreen>
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isLoading = true);
 
+    final user = Supabase.instance.client.auth.currentUser;
+    debugPrint(
+      '[CreateStoreScreen] _createStore — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user?.id ?? "null"} '
+      'name: "${_nameController.text.trim()}"',
+    );
+
     final store = await StoreService.instance.createStore(
       _nameController.text.trim(),
     );
@@ -84,12 +95,23 @@ class _CreateStoreScreenState extends State<CreateStoreScreen>
       return;
     }
 
-    // Set as current store with Owner role
+    // Drop any realtime subscriptions tied to the previous store, then write
+    // the new store into the singleton (single source of truth).
+    RealtimeService.instance.unsubscribeAll();
     StoreService.instance.setCurrentStore(store, 'Owner');
     PermissionService.instance.setUser(
       role: 'Owner',
       userId: _userId,
       isActive: true,
+      storeId: store.id,
+    );
+
+    debugPrint(
+      '[CreateStoreScreen] Store created and active — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: $_userId '
+      'store_id: ${store.id} '
+      'store_name: "${store.name}"',
     );
 
     Navigator.pushReplacementNamed(

@@ -72,8 +72,10 @@ class _MyAppState extends State<MyApp> {
       final user = client.auth.currentUser;
 
       debugPrint(
-        '[main] _resolveInitialRoute — user: ${user?.id ?? "null"} '
-        'platform: ${kIsWeb ? "web" : "mobile"}',
+        '[main] _resolveInitialRoute — '
+        'platform: ${kIsWeb ? "web" : "mobile"} '
+        'user_id: ${user?.id ?? "null"} '
+        'email: ${user?.email ?? "null"}',
       );
 
       if (user != null) {
@@ -84,15 +86,23 @@ class _MyAppState extends State<MyApp> {
         final userId = user.id;
 
         debugPrint(
-          '[main] Existing session — user_id: $userId '
-          'email: ${user.email} — fetching stores...',
+          '[main] Existing session — '
+          'platform: ${kIsWeb ? "web" : "mobile"} '
+          'user_id: $userId email: ${user.email} — '
+          'clearing stale singleton + fetching stores...',
         );
 
-        final stores = await StoreService.instance.fetchMyStores();
+        // FORCE STORE FETCH AFTER LOGIN/RESTORE — clear any stale singleton
+        // state (e.g. from a previous account on the same device) before
+        // re-resolving. Web and mobile run identical code here.
+        final result =
+            await StoreService.instance.resolveCurrentStoreAfterLogin();
+        final stores = result.stores;
 
         debugPrint(
           '[main] Stores found: ${stores.length} '
-          '${stores.map((s) => '${s.name}(${s.id})').join(', ')}',
+          '${stores.map((s) => '${s.name}(${s.id})').join(', ')} '
+          'autoSelected: ${result.autoSelected?.id ?? "null"}',
         );
 
         if (stores.isEmpty) {
@@ -104,11 +114,12 @@ class _MyAppState extends State<MyApp> {
           return;
         }
 
-        if (stores.length == 1) {
-          final store = stores.first;
-          final role = await StoreService.instance.getRoleInStore(store.id);
-          // CRITICAL: set store context BEFORE any data fetch or navigation
-          StoreService.instance.setCurrentStore(store, role);
+        if (result.autoSelected != null) {
+          final store = result.autoSelected!;
+          final role = result.role;
+          // resolveCurrentStoreAfterLogin already wrote into StoreService;
+          // assert here so any future regression is loud.
+          assert(StoreService.instance.currentStore?.id == store.id);
 
           // Check is_active for members (owners are always active)
           bool isActive = true;
@@ -133,12 +144,17 @@ class _MyAppState extends State<MyApp> {
           );
 
           debugPrint(
-            '[main] Auto-navigating to inventory — store_id: ${store.id} '
-            'name: "${store.name}" role: $role isActive: $isActive',
+            '[main] Auto-navigating to inventory — '
+            'platform: ${kIsWeb ? "web" : "mobile"} '
+            'user_id: $userId '
+            'store_id: ${store.id} '
+            'store_name: "${store.name}" '
+            'role: $role isActive: $isActive',
           );
 
           if (!isActive) {
-            // Disabled user — send to login so they see the error
+            // Disabled user — clear store and send to login
+            StoreService.instance.clearCurrentStore();
             setState(() {
               _initialRoute = AppRoutes.signUpLoginScreen;
               _ready = true;
@@ -161,8 +177,8 @@ class _MyAppState extends State<MyApp> {
           return;
         }
 
-        // Multiple stores — show store selector
-        // Pass userId so SelectStoreScreen can correctly scope queries
+        // Multiple stores — show store selector. StoreService is already
+        // cleared by resolveCurrentStoreAfterLogin, so no stale fallback.
         setState(() {
           _initialRoute = AppRoutes.selectStoreScreen;
           _initialArgs = {'userName': userName, 'userId': userId};

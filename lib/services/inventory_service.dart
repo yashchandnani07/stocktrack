@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import './store_service.dart';
 import './supabase_service.dart';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -196,13 +198,34 @@ class InventoryService {
   // ─── Items ────────────────────────────────────────────────────────────────
 
   Future<List<InventoryItem>> fetchItems(String storeId) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    final activeStore = StoreService.instance.currentStore;
     debugPrint(
-      '[InventoryService] fetchItems — store_id: "$storeId" '
-      'user_id: ${Supabase.instance.client.auth.currentUser?.id ?? "null"}',
+      '[InventoryService] fetchItems — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'requested_store_id: "$storeId" '
+      'active_store_id: "${activeStore?.id ?? "null"}" '
+      'active_store_name: "${activeStore?.name ?? ""}" '
+      'user_id: ${user?.id ?? "null"} '
+      'email: ${user?.email ?? "null"}',
     );
     if (storeId.isEmpty) {
-      debugPrint('[InventoryService] fetchItems — storeId is EMPTY, aborting');
+      debugPrint(
+        '[InventoryService] fetchItems — ABORT: storeId is EMPTY. '
+        'Caller MUST resolve a store before reading items.',
+      );
       return [];
+    }
+    if (activeStore != null && activeStore.id != storeId) {
+      // Hard signal that something is calling fetchItems with a stale id
+      // while StoreService points elsewhere. We still honor the explicit
+      // [storeId] argument (it's the contract) but log loudly so the
+      // mismatch is debuggable in production logs.
+      debugPrint(
+        '[InventoryService] fetchItems — WARNING: requested_store_id "$storeId" '
+        '!= StoreService.currentStore.id "${activeStore.id}" — '
+        'this is a likely source of "items not visible" reports.',
+      );
     }
     try {
       final response = await _client
@@ -216,7 +239,7 @@ class InventoryService {
           .toList();
       debugPrint(
         '[InventoryService] fetchItems — returned ${items.length} item(s) '
-        'for store_id: "$storeId"',
+        'for store_id: "$storeId" (user_id: ${user?.id ?? "null"})',
       );
       return items;
     } catch (e) {
@@ -226,8 +249,35 @@ class InventoryService {
   }
 
   Future<InventoryItem?> createItem(InventoryItem item) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    final activeStore = StoreService.instance.currentStore;
+    debugPrint(
+      '[InventoryService] createItem — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'requested_store_id: "${item.storeId}" '
+      'active_store_id: "${activeStore?.id ?? "null"}" '
+      'name: "${item.name}" '
+      'user_id: ${user?.id ?? "null"}',
+    );
     // Validate storeId is present — prevents orphan inserts
-    if (item.storeId.isEmpty) return null;
+    if (item.storeId.isEmpty) {
+      lastError =
+          'Cannot create item without a store. Please re-select your store.';
+      return null;
+    }
+    if (activeStore != null && activeStore.id != item.storeId) {
+      // Refuse to write to a store that doesn't match the active context.
+      // This is what prevents the "created on web, invisible on mobile"
+      // class of bugs at write-time.
+      debugPrint(
+        '[InventoryService] createItem — REJECT: item.storeId '
+        '"${item.storeId}" != active store "${activeStore.id}". '
+        'Refusing to create item under a stale store context.',
+      );
+      lastError =
+          'Store context mismatch. Please re-select your store and try again.';
+      return null;
+    }
     // Validate name
     final trimmedName = item.name.trim();
     if (trimmedName.isEmpty || trimmedName.length > kMaxItemNameLength) {
@@ -277,9 +327,16 @@ class InventoryService {
     required double delta, // positive for in, negative for out
     required String updatedBy,
   }) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    final activeStore = StoreService.instance.currentStore;
     debugPrint(
-      '[InventoryService] applyStockDelta — item_id: "$itemId" '
-      'store_id: "$storeId" delta: $delta updatedBy: "$updatedBy"',
+      '[InventoryService] applyStockDelta — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'item_id: "$itemId" '
+      'requested_store_id: "$storeId" '
+      'active_store_id: "${activeStore?.id ?? "null"}" '
+      'delta: $delta updatedBy: "$updatedBy" '
+      'user_id: ${user?.id ?? "null"}',
     );
     if (storeId.isEmpty || itemId.isEmpty) {
       debugPrint(
@@ -288,7 +345,24 @@ class InventoryService {
       );
       return const StockUpdateResult(
         success: false,
-        error: 'Invalid item or store',
+        error: storeId.isEmpty
+            ? 'No store selected. Please re-select your store.'
+            : 'Invalid item.',
+      );
+    }
+    if (activeStore != null && activeStore.id != storeId) {
+      // Caller passed a stale storeId while the singleton has moved on.
+      // Refuse the write — if we let it through, the row would update
+      // under one store while the user is viewing another.
+      debugPrint(
+        '[InventoryService] applyStockDelta — REJECTED: requested_store_id '
+        '"$storeId" != active store "${activeStore.id}" — STORE CONTEXT '
+        'MISMATCH. Refusing to write under a stale store context.',
+      );
+      return const StockUpdateResult(
+        success: false,
+        error:
+            'Store context mismatch. Please refresh and re-select your store.',
       );
     }
     if (delta == 0) {

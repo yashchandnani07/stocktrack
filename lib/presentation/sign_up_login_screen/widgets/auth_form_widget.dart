@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -85,7 +86,9 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
     }
 
     debugPrint(
-      '[AuthForm] Login success — user_id: ${user.id} email: ${user.email}',
+      '[AuthForm] Login success — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user.id} email: ${user.email}',
     );
 
     final userName =
@@ -111,7 +114,9 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
     }
 
     debugPrint(
-      '[AuthForm] Sign-up success — user_id: ${user.id} email: ${user.email}',
+      '[AuthForm] Sign-up success — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user.id} email: ${user.email}',
     );
 
     await _navigateAfterAuth(userId: user.id, userName: name);
@@ -123,13 +128,23 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
   }) async {
     if (!mounted) return;
 
-    debugPrint('[AuthForm] _navigateAfterAuth — user_id: $userId');
+    debugPrint(
+      '[AuthForm] _navigateAfterAuth — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: $userId userName: "$userName"',
+    );
 
-    // Fetch stores for this user
-    final stores = await StoreService.instance.fetchMyStores();
+    // FORCE STORE FETCH AFTER LOGIN — clear any stale singleton state from a
+    // prior session/account so the auto-select logic operates on freshly
+    // resolved data only. This is required by the "single source of truth"
+    // contract: web and mobile both run this exact code path.
+    final result = await StoreService.instance.resolveCurrentStoreAfterLogin();
+    final stores = result.stores;
 
     debugPrint(
-      '[AuthForm] _navigateAfterAuth — stores found: ${stores.length}',
+      '[AuthForm] _navigateAfterAuth — stores found: ${stores.length} '
+      '${stores.map((s) => '${s.name}(${s.id})').join(', ')} '
+      'autoSelected: ${result.autoSelected?.id ?? "null"}',
     );
 
     if (!mounted) return;
@@ -141,15 +156,23 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
         AppRoutes.createStoreScreen,
         arguments: {'userName': userName, 'userId': userId},
       );
-    } else if (stores.length == 1) {
-      // Single store — go directly
-      final store = stores.first;
-      final role = await StoreService.instance.getRoleInStore(store.id);
-      StoreService.instance.setCurrentStore(store, role);
+      return;
+    }
+
+    if (result.autoSelected != null) {
+      // Single store — already written into StoreService by
+      // resolveCurrentStoreAfterLogin(). Verify it before navigating.
+      final store = result.autoSelected!;
+      final role = result.role;
+      assert(StoreService.instance.currentStore?.id == store.id);
 
       debugPrint(
-        '[AuthForm] Single store selected — store_id: ${store.id} '
-        'name: "${store.name}" role: $role',
+        '[AuthForm] Single store auto-selected — '
+        'platform: ${kIsWeb ? "web" : "mobile"} '
+        'user_id: $userId '
+        'store_id: ${store.id} '
+        'store_name: "${store.name}" '
+        'role: $role',
       );
 
       // Fetch actual is_active status for this member
@@ -178,6 +201,9 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
       if (!mounted) return;
 
       if (!isActive) {
+        // Disabled member — clear any in-memory store so they cannot
+        // proceed past this point even via stale singletons.
+        StoreService.instance.clearCurrentStore();
         setState(
           () => _errorMessage =
               'Your account has been disabled. Contact the store owner.',
@@ -197,14 +223,17 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
           'storeName': store.name,
         },
       );
-    } else {
-      // Multiple stores — show selector
-      Navigator.pushReplacementNamed(
-        context,
-        AppRoutes.selectStoreScreen,
-        arguments: {'userName': userName, 'userId': userId},
-      );
+      return;
     }
+
+    // Multiple stores — show selector. StoreService is already cleared by
+    // resolveCurrentStoreAfterLogin so the selector won't accidentally render
+    // stale state.
+    Navigator.pushReplacementNamed(
+      context,
+      AppRoutes.selectStoreScreen,
+      arguments: {'userName': userName, 'userId': userId},
+    );
   }
 
   @override
