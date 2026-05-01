@@ -249,6 +249,9 @@ class InventoryService {
   }
 
   Future<InventoryItem?> createItem(InventoryItem item) async {
+    // Reset before each attempt so the UI never reports stale errors from a
+    // previous unrelated call.
+    lastError = null;
     final user = Supabase.instance.client.auth.currentUser;
     final activeStore = StoreService.instance.currentStore;
     debugPrint(
@@ -263,24 +266,32 @@ class InventoryService {
     if (item.storeId.isEmpty) {
       lastError =
           'Cannot create item without a store. Please re-select your store.';
+      debugPrint('[InventoryService] createItem — REJECT: $lastError');
       return null;
     }
     if (activeStore != null && activeStore.id != item.storeId) {
       // Refuse to write to a store that doesn't match the active context.
       // This is what prevents the "created on web, invisible on mobile"
       // class of bugs at write-time.
+      lastError =
+          'Store context mismatch. Please re-select your store and try again.';
       debugPrint(
         '[InventoryService] createItem — REJECT: item.storeId '
         '"${item.storeId}" != active store "${activeStore.id}". '
         'Refusing to create item under a stale store context.',
       );
-      lastError =
-          'Store context mismatch. Please re-select your store and try again.';
       return null;
     }
     // Validate name
     final trimmedName = item.name.trim();
-    if (trimmedName.isEmpty || trimmedName.length > kMaxItemNameLength) {
+    if (trimmedName.isEmpty) {
+      lastError = 'Item name cannot be empty.';
+      debugPrint('[InventoryService] createItem — REJECT: $lastError');
+      return null;
+    }
+    if (trimmedName.length > kMaxItemNameLength) {
+      lastError = 'Item name is too long (max $kMaxItemNameLength characters).';
+      debugPrint('[InventoryService] createItem — REJECT: $lastError');
       return null;
     }
     try {
@@ -290,9 +301,20 @@ class InventoryService {
           .select()
           .single();
 
-      return InventoryItem.fromMap(response);
+      final created = InventoryItem.fromMap(response);
+      debugPrint(
+        '[InventoryService] createItem — OK: id="${created.id}" '
+        'store_id="${created.storeId}" name="${created.name}"',
+      );
+      return created;
     } catch (e) {
+      // Surface the full error to logs so adb logcat shows the real cause
+      // (RLS, unique-violation, network, etc.) instead of a generic null.
       lastError = e.toString();
+      debugPrint(
+        '[InventoryService] createItem — EXCEPTION '
+        'store_id="${item.storeId}" name="${item.name}" — $e',
+      );
       return null;
     }
   }
