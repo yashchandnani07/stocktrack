@@ -343,7 +343,7 @@ class InventoryService {
         '[InventoryService] applyStockDelta — REJECTED: '
         'storeId empty=${storeId.isEmpty} itemId empty=${itemId.isEmpty}',
       );
-      return const StockUpdateResult(
+      return StockUpdateResult(
         success: false,
         error: storeId.isEmpty
             ? 'No store selected. Please re-select your store.'
