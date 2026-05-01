@@ -272,6 +272,29 @@ class _InventoryScreenState extends State<InventoryScreen>
         userRole: _userRole,
         userName: _userName,
         onConfirm: (quantity) async {
+          // Defense-in-depth: an item with empty id should never reach this
+          // handler — but if it ever does (e.g. a stale optimistic stub left
+          // behind by a previous bug) we surface a clear error and force a
+          // refresh instead of asking the server about an item that doesn't
+          // exist. This is what previously surfaced as "Invalid item." with no
+          // explanation.
+          if (item.id.isEmpty) {
+            debugPrint(
+              '[InventoryScreen] _onStockAction — REJECTED: item.id is empty. '
+              'item.name="${item.name}" — this row is a phantom local entry; '
+              'forcing reload from DB.',
+            );
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'This item is not yet saved to the database. Refreshing inventory…',
+                ),
+                backgroundColor: AppTheme.error,
+              ),
+            );
+            await _loadItems();
+            return;
+          }
           // Use atomic delta update to prevent race conditions
           final delta = isStockIn ? quantity : -quantity;
           final result = await InventoryService.instance.applyStockDelta(
@@ -338,7 +361,22 @@ class _InventoryScreenState extends State<InventoryScreen>
         'storeName': _storeName,
         'categories': _categories.where((c) => c != 'All').toList(),
         'onSave': (InventoryItem newItem) {
-          setState(() => _items.insert(0, newItem));
+          // Belt-and-suspenders: the AddEditItemScreen now refuses to call us
+          // with a stub-id, but if anything regresses we still won't insert a
+          // phantom row that breaks every subsequent stock update.
+          if (newItem.id.isEmpty) {
+            debugPrint(
+              '[InventoryScreen] add onSave — REJECTED: newItem.id is empty '
+              '(name="${newItem.name}"). Refusing to insert phantom row.',
+            );
+            return;
+          }
+          setState(() {
+            // Realtime onInsert may have already added this item; dedupe.
+            if (!_items.any((i) => i.id == newItem.id)) {
+              _items.insert(0, newItem);
+            }
+          });
           ActivityLogService.instance.log(
             storeId: _storeId,
             userId: _userId,

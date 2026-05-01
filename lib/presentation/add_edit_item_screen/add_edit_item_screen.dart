@@ -140,27 +140,53 @@ class _AddEditItemScreenState extends State<AddEditItemScreen> {
     InventoryItem? saved;
     if (_isEdit && _editItem != null) {
       saved = await InventoryService.instance.updateItem(newItem.copyWith());
-      saved ??= newItem;
     } else {
       saved = await InventoryService.instance.createItem(newItem);
-      saved ??= newItem;
     }
 
-    if (mounted) {
-      setState(() => _isLoading = false);
-      final args = ModalRoute.of(context)?.settings.arguments as Map?;
-      if (args?['onSave'] is Function) {
-        (args!['onSave'] as Function)(saved);
-      }
-      Navigator.pop(context);
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    // ── HARD FAILURE: do NOT fake success ────────────────────────────────────
+    // Previously this code did `saved ??= newItem` and called the parent's
+    // onSave with a stub whose id was '' — the parent would then insert that
+    // stub into _items. The user would see "Item added successfully", but no
+    // row existed in the DB, so any subsequent stock +/- on it returned
+    // "Invalid item." That silent fallback is the bug the user hit.
+    //
+    // Now: if the service returned null we surface the real error and stay on
+    // the form so the user can retry without polluting the inventory list with
+    // a phantom row.
+    if (saved == null || saved.id.isEmpty) {
+      final detail = InventoryService.instance.lastError;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            _isEdit ? 'Item updated successfully' : 'Item added successfully',
+            detail != null && detail.isNotEmpty
+                ? (_isEdit ? 'Update failed: $detail' : 'Create failed: $detail')
+                : (_isEdit
+                      ? 'Update failed. Please refresh and try again.'
+                      : 'Create failed. Please refresh and try again.'),
           ),
+          backgroundColor: AppTheme.error,
+          duration: const Duration(seconds: 6),
         ),
       );
+      return;
     }
+
+    final args = ModalRoute.of(context)?.settings.arguments as Map?;
+    if (args?['onSave'] is Function) {
+      (args!['onSave'] as Function)(saved);
+    }
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _isEdit ? 'Item updated successfully' : 'Item added successfully',
+        ),
+      ),
+    );
   }
 
   void _handleDelete() {
