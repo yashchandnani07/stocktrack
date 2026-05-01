@@ -91,26 +91,141 @@ class StoreService {
   String _currentRole = 'Staff';
   String get currentRole => _currentRole;
 
+  /// Returns the current store id, or empty string if not set.
+  /// Prefer [requireCurrentStoreId] when the caller cannot proceed without one.
+  String get currentStoreId => _currentStore?.id ?? '';
+  String get currentStoreName => _currentStore?.name ?? '';
+
+  /// Throws [StateError] when no store is selected. Use this in code paths
+  /// that MUST have a valid store context (e.g. queries, mutations).
+  String requireCurrentStoreId() {
+    final id = _currentStore?.id ?? '';
+    if (id.isEmpty) {
+      throw StateError(
+        'StoreService.requireCurrentStoreId called before a store was selected. '
+        'Block the action and route the user to the store selector.',
+      );
+    }
+    return id;
+  }
+
+  /// Returns true when the in-memory store matches [storeId].
+  /// Use this on every store-scoped read/write to catch mismatches early.
+  bool matchesCurrentStore(String storeId) {
+    if (storeId.isEmpty) return false;
+    return _currentStore?.id == storeId;
+  }
+
+  /// Logs the current auth + store context. Use at the start of any flow
+  /// where the user reports "items missing" / "invalid item or store".
+  void logContext(String tag) {
+    final user = _client.auth.currentUser;
+    debugPrint(
+      '[StoreService] $tag — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user?.id ?? "null"} '
+      'email: ${user?.email ?? "null"} '
+      'store_id: ${_currentStore?.id ?? "null"} '
+      'store_name: "${_currentStore?.name ?? ""}" '
+      'role: $_currentRole',
+    );
+  }
+
   void setCurrentStore(StoreModel store, String role) {
+    final user = _client.auth.currentUser;
+    final previousId = _currentStore?.id;
     _currentStore = store;
     _currentRole = role;
     debugPrint(
-      '[StoreService] setCurrentStore — store_id: ${store.id} '
-      'name: "${store.name}" role: $role',
+      '[StoreService] setCurrentStore — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user?.id ?? "null"} '
+      'previous_store_id: ${previousId ?? "null"} '
+      'store_id: ${store.id} '
+      'name: "${store.name}" '
+      'role: $role',
     );
   }
 
   void clearCurrentStore() {
+    final user = _client.auth.currentUser;
+    debugPrint(
+      '[StoreService] clearCurrentStore — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user?.id ?? "null"} '
+      'previous_store_id: ${_currentStore?.id ?? "null"}',
+    );
     _currentStore = null;
     _currentRole = 'Staff';
+  }
+
+  /// Re-resolve the current store from the DB by id. Returns the refreshed
+  /// store, or null if the store no longer exists / user lost access.
+  /// This is the canonical way to confirm the in-memory store still matches
+  /// what the database thinks (e.g. after long sessions or cross-platform use).
+  Future<StoreModel?> refreshCurrentStoreFromDb() async {
+    final id = _currentStore?.id;
+    if (id == null || id.isEmpty) return null;
+    try {
+      final resp = await _client
+          .from('stores')
+          .select()
+          .eq('id', id)
+          .maybeSingle();
+      if (resp == null) {
+        debugPrint(
+          '[StoreService] refreshCurrentStoreFromDb — store $id no longer accessible',
+        );
+        clearCurrentStore();
+        return null;
+      }
+      final fresh = StoreModel.fromMap(resp);
+      _currentStore = fresh;
+      debugPrint(
+        '[StoreService] refreshCurrentStoreFromDb — refreshed '
+        'store_id: ${fresh.id} name: "${fresh.name}"',
+      );
+      return fresh;
+    } catch (e) {
+      debugPrint('[StoreService] refreshCurrentStoreFromDb — error: $e');
+      return _currentStore;
+    }
+  }
+
+  /// Look up which store an item belongs to. Returns null if the item
+  /// doesn't exist OR the caller can't read it (RLS).
+  /// Used by [InventoryService] to surface a precise error when the
+  /// in-memory store doesn't match the item's actual store.
+  Future<String?> findItemStoreId(String itemId) async {
+    if (itemId.isEmpty) return null;
+    try {
+      final resp = await _client
+          .from('inventory_items')
+          .select('store_id')
+          .eq('id', itemId)
+          .maybeSingle();
+      return resp?['store_id'] as String?;
+    } catch (e) {
+      debugPrint('[StoreService] findItemStoreId — error: $e');
+      return null;
+    }
   }
 
   /// Fetch all stores accessible to the current user (owned + member).
   /// The explicit join through store_members ensures only accessible stores
   /// are returned even if RLS is misconfigured.
+  ///
+  /// IMPORTANT: this is the SINGLE source of truth used by both web and mobile.
+  /// Both platforms run identical Dart code here, so any "store mismatch"
+  /// must come from divergent in-memory state — not from this query.
   Future<List<StoreModel>> fetchMyStores() async {
-    final userId = _client.auth.currentUser?.id;
-    debugPrint('[StoreService] fetchMyStores — user_id: $userId');
+    final user = _client.auth.currentUser;
+    final userId = user?.id;
+    debugPrint(
+      '[StoreService] fetchMyStores — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: $userId email: ${user?.email}',
+    );
     if (userId == null) {
       debugPrint(
         '[StoreService] fetchMyStores — no authenticated user, returning empty list',
@@ -159,7 +274,8 @@ class StoreService {
         return a.id.compareTo(b.id);
       });
       debugPrint(
-        '[StoreService] fetchMyStores — found ${stores.length} store(s): '
+        '[StoreService] fetchMyStores — found ${stores.length} store(s) '
+        'for user_id: $userId — '
         '${stores.map((s) => '${s.name}(${s.id})').join(', ')}',
       );
       return stores;
@@ -167,6 +283,30 @@ class StoreService {
       debugPrint('[StoreService] fetchMyStores — error: $e');
       return [];
     }
+  }
+
+  /// Resolve the canonical "current store" for a freshly-authenticated user.
+  ///
+  /// Returns:
+  ///  - `(stores: [...], autoSelected: store)` when the user has exactly one store
+  ///    (the [autoSelected] is also written into [_currentStore]/[_currentRole]).
+  ///  - `(stores: [...], autoSelected: null)` when the user has 0 or 2+ stores.
+  ///
+  /// Callers MUST clear any cached state (`clearCurrentStore`) before calling
+  /// this so that a stale singleton from a previous account/session cannot
+  /// leak into the new context. This is the function the README/docs refer
+  /// to as the "single source of truth" for store_id resolution.
+  Future<({List<StoreModel> stores, StoreModel? autoSelected, String role})>
+  resolveCurrentStoreAfterLogin() async {
+    clearCurrentStore();
+    final stores = await fetchMyStores();
+    if (stores.length == 1) {
+      final store = stores.first;
+      final role = await getRoleInStore(store.id);
+      setCurrentStore(store, role);
+      return (stores: stores, autoSelected: store, role: role);
+    }
+    return (stores: stores, autoSelected: null, role: 'Staff');
   }
 
   /// Create a new store for the current user

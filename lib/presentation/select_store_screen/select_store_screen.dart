@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../theme/app_theme.dart';
+import '../../services/realtime_service.dart';
 import '../../services/store_service.dart';
 import '../../services/permission_service.dart';
 import '../../routes/app_routes.dart';
@@ -60,7 +63,16 @@ class _SelectStoreScreenState extends State<SelectStoreScreen>
   }
 
   Future<void> _loadStores() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    debugPrint(
+      '[SelectStoreScreen] _loadStores — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: ${user?.id ?? "null"} email: ${user?.email ?? "null"}',
+    );
     setState(() => _isLoading = true);
+    // Always fetch fresh from DB — never trust the in-memory cache here.
+    // This is the screen the user lands on when there are multiple stores;
+    // it MUST show exactly what the database considers accessible.
     final stores = await StoreService.instance.fetchMyStores();
     if (mounted) {
       setState(() {
@@ -72,7 +84,21 @@ class _SelectStoreScreenState extends State<SelectStoreScreen>
   }
 
   Future<void> _selectStore(StoreModel store) async {
+    debugPrint(
+      '[SelectStoreScreen] _selectStore — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: $_userId '
+      'store_id: ${store.id} '
+      'store_name: "${store.name}"',
+    );
+
+    // Drop any realtime subscriptions tied to a previously-selected store
+    // so the new store's inventory subscription starts cleanly.
+    RealtimeService.instance.unsubscribeAll();
+
     final role = await StoreService.instance.getRoleInStore(store.id);
+    // setCurrentStore is the SINGLE write into the singleton — every
+    // downstream read should pull from StoreService.instance.currentStore.
     StoreService.instance.setCurrentStore(store, role);
 
     // Fetch actual is_active status for this member from DB
@@ -96,12 +122,22 @@ class _SelectStoreScreenState extends State<SelectStoreScreen>
       role: role,
       userId: _userId,
       isActive: isActive,
-      storeId: store.id, // ← was missing: needed for refreshActiveStatus()
+      storeId: store.id,
+    );
+
+    debugPrint(
+      '[SelectStoreScreen] Store selected — '
+      'platform: ${kIsWeb ? "web" : "mobile"} '
+      'user_id: $_userId store_id: ${store.id} '
+      'store_name: "${store.name}" role: $role isActive: $isActive',
     );
 
     if (!mounted) return;
 
     if (!isActive) {
+      // Disabled — refuse to honor the selection: clear the singleton so any
+      // subsequent silent fallback can't proceed.
+      StoreService.instance.clearCurrentStore();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(

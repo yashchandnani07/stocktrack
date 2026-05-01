@@ -51,85 +51,129 @@ class _InventoryScreenState extends State<InventoryScreen>
   void didChangeDependencies() {
     super.didChangeDependencies();
     final args = ModalRoute.of(context)?.settings.arguments;
-    if (args is Map) {
-      final newRole = args['role'] as String? ?? 'Staff';
-      final newUserId = args['userId'] as String? ?? '';
-      // Always prefer route args storeId, but fall back to StoreService singleton
-      // (handles APK session restore where args may be stale)
-      final argsStoreId = args['storeId'] as String? ?? '';
-      final serviceStoreId = StoreService.instance.currentStore?.id ?? '';
-      final newStoreId = argsStoreId.isNotEmpty ? argsStoreId : serviceStoreId;
-      final isActive = args['isActive'] as bool? ?? true;
+    final argsMap = args is Map ? args : const {};
 
-      final storeChanged = newStoreId != _storeId;
-      final roleChanged = newRole != _userRole;
+    // ── SINGLE SOURCE OF TRUTH ───────────────────────────────────────────────
+    // StoreService.instance.currentStore is the authoritative store context.
+    // Route args are only used to populate it when the screen is entered fresh
+    // (e.g. immediately after login or store-selection). If args ever disagree
+    // with the singleton, the singleton wins and we log loudly so divergences
+    // surface in production logs.
+    final argsStoreId = argsMap['storeId'] as String? ?? '';
+    final serviceStore = StoreService.instance.currentStore;
+    final serviceStoreId = serviceStore?.id ?? '';
 
-      _userRole = newRole;
-      _userName = args['userName'] as String? ?? '';
-      _userId = newUserId;
-      _storeId = newStoreId;
-      _storeName =
-          args['storeName'] as String? ??
-          StoreService.instance.currentStore?.name ??
-          '';
-
-      // Sync StoreService singleton if it's out of date
-      // (e.g. APK restored session navigated directly to inventory)
-      if (_storeId.isNotEmpty &&
-          StoreService.instance.currentStore?.id != _storeId) {
+    // If StoreService is empty but args carry a storeId, this is the only
+    // case where args populate the singleton (immediately after login /
+    // store-selection where setCurrentStore was already called by the nav).
+    String resolvedStoreId;
+    String resolvedStoreName;
+    if (serviceStoreId.isNotEmpty) {
+      if (argsStoreId.isNotEmpty && argsStoreId != serviceStoreId) {
         debugPrint(
-          '[InventoryScreen] StoreService out of sync — '
-          'service: ${StoreService.instance.currentStore?.id} '
-          'screen: $_storeId — will re-fetch role',
+          '[InventoryScreen] args.storeId="$argsStoreId" disagrees with '
+          'StoreService.currentStore.id="$serviceStoreId" — using SINGLETON '
+          '(single source of truth). Args may be stale.',
         );
       }
-
-      if (_storeId.isNotEmpty) {
-        PermissionService.instance.setUser(
-          role: _userRole,
-          userId: _userId,
-          isActive: isActive,
-          storeId: _storeId,
-        );
-      }
-
-      // Reload if store changed, role changed, or on first load
-      if (_storeId.isNotEmpty && (storeChanged || roleChanged || _isLoading)) {
-        _loadItems();
-      }
+      resolvedStoreId = serviceStoreId;
+      resolvedStoreName = serviceStore!.name;
+    } else if (argsStoreId.isNotEmpty) {
+      // Should not normally happen — navigator should set the singleton first
+      debugPrint(
+        '[InventoryScreen] StoreService empty but args have storeId="$argsStoreId" '
+        '— honoring args but will redirect on next frame if singleton stays empty.',
+      );
+      resolvedStoreId = argsStoreId;
+      resolvedStoreName = argsMap['storeName'] as String? ?? '';
     } else {
-      // No route args — try to recover from StoreService singleton
-      // This handles the case where InventoryScreen is pushed without args
-      final serviceStore = StoreService.instance.currentStore;
-      if (serviceStore != null && _storeId.isEmpty) {
-        _storeId = serviceStore.id;
-        _storeName = serviceStore.name;
-        _userRole = StoreService.instance.currentRole;
+      resolvedStoreId = '';
+      resolvedStoreName = '';
+    }
+
+    // ── BLOCK ACTIONS WHEN STORE IS NOT SET ──────────────────────────────────
+    // If we still have no store, we cannot safely render this screen — every
+    // query / mutation here is store-scoped. Redirect to the store selector.
+    if (resolvedStoreId.isEmpty) {
+      debugPrint(
+        '[InventoryScreen] No active store — redirecting to selectStoreScreen. '
+        'user_id: ${Supabase.instance.client.auth.currentUser?.id ?? "null"}',
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         final user = Supabase.instance.client.auth.currentUser;
-        if (user != null) {
-          _userId = user.id;
-          _userName =
+        if (user == null) {
+          Navigator.pushReplacementNamed(context, AppRoutes.signUpLoginScreen);
+          return;
+        }
+        Navigator.pushReplacementNamed(
+          context,
+          AppRoutes.selectStoreScreen,
+          arguments: {
+            'userName':
+                user.userMetadata?['full_name'] as String? ??
+                user.email?.split('@').first ??
+                'User',
+            'userId': user.id,
+          },
+        );
+      });
+      return;
+    }
+
+    // Resolve identity
+    final newRole = argsMap['role'] as String? ?? StoreService.instance.currentRole;
+    String newUserId = argsMap['userId'] as String? ?? '';
+    String newUserName = argsMap['userName'] as String? ?? '';
+    if (newUserId.isEmpty) {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user != null) {
+        newUserId = user.id;
+        if (newUserName.isEmpty) {
+          newUserName =
               user.userMetadata?['full_name'] as String? ??
               user.email?.split('@').first ??
               'User';
         }
-        debugPrint(
-          '[InventoryScreen] No route args — recovered from StoreService: '
-          'store_id: $_storeId role: $_userRole user_id: $_userId',
-        );
-        PermissionService.instance.setUser(
-          role: _userRole,
-          userId: _userId,
-          isActive: true,
-          storeId: _storeId,
-        );
-        _loadItems();
       }
+    }
+    final isActive = argsMap['isActive'] as bool? ?? true;
+
+    final storeChanged = resolvedStoreId != _storeId;
+    final roleChanged = newRole != _userRole;
+
+    _userRole = newRole;
+    _userName = newUserName;
+    _userId = newUserId;
+    _storeId = resolvedStoreId;
+    _storeName = resolvedStoreName;
+
+    debugPrint(
+      '[InventoryScreen] context resolved — '
+      'user_id: $_userId store_id: $_storeId store_name: "$_storeName" '
+      'role: $_userRole isActive: $isActive '
+      'storeChanged=$storeChanged roleChanged=$roleChanged',
+    );
+
+    PermissionService.instance.setUser(
+      role: _userRole,
+      userId: _userId,
+      isActive: isActive,
+      storeId: _storeId,
+    );
+
+    // Reload if store changed, role changed, or on first load
+    if (storeChanged || roleChanged || _isLoading) {
+      _loadItems();
     }
   }
 
   Future<void> _loadItems() async {
-    if (_storeId.isEmpty) return;
+    StoreService.instance.logContext('InventoryScreen._loadItems');
+    if (_storeId.isEmpty) {
+      debugPrint('[InventoryScreen] _loadItems aborted: _storeId is empty');
+      return;
+    }
     // Unsubscribe existing realtime channel before re-subscribing
     // (handles store switch without screen rebuild)
     if (_realtimeSubscribed) {
