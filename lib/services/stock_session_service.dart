@@ -28,13 +28,26 @@ class StockSessionItem {
     'unit': unit,
   };
 
-  factory StockSessionItem.fromMap(Map<String, dynamic> m) => StockSessionItem(
-    itemId: m['item_id'] as String? ?? '',
-    itemName: m['item_name'] as String? ?? '',
-    category: m['category'] as String? ?? 'General',
-    quantity: (m['quantity'] as num?)?.toDouble() ?? 0.0,
-    unit: m['unit'] as String? ?? 'pcs',
-  );
+  factory StockSessionItem.fromMap(Map<String, dynamic> m) {
+    // Be permissive about quantity type — Postgres NUMERIC may come back as
+    // int, double, or string depending on the value.
+    final rawQty = m['quantity'];
+    double qty;
+    if (rawQty is num) {
+      qty = rawQty.toDouble();
+    } else if (rawQty is String) {
+      qty = double.tryParse(rawQty) ?? 0.0;
+    } else {
+      qty = 0.0;
+    }
+    return StockSessionItem(
+      itemId: m['item_id'] as String? ?? '',
+      itemName: m['item_name'] as String? ?? '',
+      category: m['category'] as String? ?? 'General',
+      quantity: qty,
+      unit: m['unit'] as String? ?? 'pcs',
+    );
+  }
 }
 
 /// A stock session record
@@ -67,6 +80,27 @@ class StockSession {
     Map<String, dynamic> m, {
     List<StockSessionItem> items = const [],
   }) {
+    // total_items may come back as int OR double depending on Supabase
+    // version. Coerce defensively to avoid the same kind of cast crash that
+    // bit InventoryItem.fromMap.
+    final rawTotal = m['total_items'];
+    int totalItems;
+    if (rawTotal is int) {
+      totalItems = rawTotal;
+    } else if (rawTotal is num) {
+      totalItems = rawTotal.toInt();
+    } else if (rawTotal is String) {
+      totalItems = int.tryParse(rawTotal) ?? 0;
+    } else {
+      totalItems = 0;
+    }
+    DateTime createdAt;
+    final rawCreated = m['created_at'];
+    if (rawCreated is String && rawCreated.isNotEmpty) {
+      createdAt = DateTime.tryParse(rawCreated) ?? DateTime.now();
+    } else {
+      createdAt = DateTime.now();
+    }
     return StockSession(
       id: m['id'] as String? ?? '',
       storeId: m['store_id'] as String? ?? '',
@@ -74,11 +108,9 @@ class StockSession {
       performedById: m['performed_by_id'] as String? ?? '',
       performedByName: m['performed_by_name'] as String? ?? '',
       performedByRole: m['performed_by_role'] as String? ?? 'Staff',
-      totalItems: m['total_items'] as int? ?? 0,
+      totalItems: totalItems,
       notes: m['notes'] as String?,
-      createdAt: m['created_at'] != null
-          ? DateTime.parse(m['created_at'] as String)
-          : DateTime.now(),
+      createdAt: createdAt,
       items: items,
     );
   }

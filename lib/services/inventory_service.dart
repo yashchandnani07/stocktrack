@@ -12,6 +12,47 @@ const int kMaxThreshold = 999999;
 /// Rounds a quantity to at most 2 decimal places to avoid floating-point drift.
 double _roundQty(double v) => (v * 100).roundToDouble() / 100;
 
+// ── Robust JSON parsers ──────────────────────────────────────────────────────
+// Supabase returns NUMERIC columns as a JSON number that Dart parses as
+// `double` (e.g. `5.0`) when the column has a decimal default — even if the
+// stored value has no fractional part. Using `as int?` then throws
+// "type 'double' is not a subtype of type 'int?' in type cast", which is
+// exactly the user-visible "Create failed: …" error reported on Android.
+//
+// Every numeric/string read from a Supabase row MUST go through these helpers
+// so the parse never throws on a representation surprise (int↔double↔string).
+double _asDouble(dynamic v, [double fallback = 0.0]) {
+  if (v == null) return fallback;
+  if (v is double) return v;
+  if (v is int) return v.toDouble();
+  if (v is num) return v.toDouble();
+  if (v is String) return double.tryParse(v) ?? fallback;
+  return fallback;
+}
+
+int _asInt(dynamic v, [int fallback = 0]) {
+  if (v == null) return fallback;
+  if (v is int) return v;
+  if (v is double) return v.toInt();
+  if (v is num) return v.toInt();
+  if (v is String) {
+    return int.tryParse(v) ?? double.tryParse(v)?.toInt() ?? fallback;
+  }
+  return fallback;
+}
+
+String _asString(dynamic v, [String fallback = '']) {
+  if (v == null) return fallback;
+  if (v is String) return v;
+  return v.toString();
+}
+
+String? _asStringNullable(dynamic v) {
+  if (v == null) return null;
+  if (v is String) return v.isEmpty ? null : v;
+  return v.toString();
+}
+
 /// Formats a quantity for display: whole numbers show without decimals,
 /// fractional values show up to 2 decimal places.
 String formatQuantity(double qty) {
@@ -51,24 +92,31 @@ class InventoryItem {
   });
 
   factory InventoryItem.fromMap(Map<String, dynamic> map) {
-    // quantity may come back as int or double from Supabase
-    final rawQty = map['quantity'];
-    final qty = rawQty is int
-        ? rawQty.toDouble()
-        : (rawQty as num?)?.toDouble() ?? 0.0;
+    // Every numeric/string read goes through the _as* helpers so the parse
+    // can't blow up on int↔double↔string surprises from Postgres NUMERIC
+    // columns. See the comment on `_asInt` at the top of this file for the
+    // exact bug ("Create failed: type 'double' is not a subtype of 'int?'").
+    DateTime parsedUpdatedAt;
+    final rawUpdatedAt = map['updated_at'];
+    if (rawUpdatedAt is String && rawUpdatedAt.isNotEmpty) {
+      parsedUpdatedAt = DateTime.tryParse(rawUpdatedAt) ?? DateTime.now();
+    } else {
+      parsedUpdatedAt = DateTime.now();
+    }
     return InventoryItem(
-      id: map['id'] as String,
-      storeId: map['store_id'] as String,
-      name: map['name'] as String,
-      category: map['category'] as String? ?? 'General',
-      quantity: _roundQty(qty),
-      lowStockThreshold: map['low_stock_threshold'] as int? ?? 5,
-      unit: map['unit'] as String? ?? 'pcs',
-      barcode: map['barcode'] as String?,
-      lastUpdated: map['updated_at'] != null
-          ? DateTime.parse(map['updated_at'] as String)
-          : DateTime.now(),
-      updatedBy: map['updated_by'] as String? ?? '',
+      id: _asString(map['id']),
+      storeId: _asString(map['store_id']),
+      name: _asString(map['name']),
+      category: _asString(map['category'], 'General'),
+      quantity: _roundQty(_asDouble(map['quantity'])),
+      // low_stock_threshold column is NUMERIC(10,2) in DB but we keep this
+      // a Dart int — coerce via num.toInt() so a `5.0` from Postgres parses
+      // cleanly. This was the original "Create failed: type 'double' …" bug.
+      lowStockThreshold: _asInt(map['low_stock_threshold'], 5),
+      unit: _asString(map['unit'], 'pcs'),
+      barcode: _asStringNullable(map['barcode']),
+      lastUpdated: parsedUpdatedAt,
+      updatedBy: _asString(map['updated_by']),
     );
   }
 
@@ -137,26 +185,19 @@ class CategoryModel {
   });
 
   factory CategoryModel.fromMap(Map<String, dynamic> map) {
-    // color_value is stored as bigint in DB — may come back as int or String
-    final rawColor = map['color_value'];
-    int colorInt;
-    if (rawColor is int) {
-      colorInt = rawColor;
-    } else if (rawColor is String) {
-      colorInt = int.tryParse(rawColor) ?? 0xFF3B5BDB;
-    } else {
-      colorInt = 0xFF3B5BDB;
-    }
+    // color_value is BIGINT in DB; icon_code is INTEGER in DB; item_count
+    // is computed in Dart and never present in the row. All numeric reads go
+    // through _asInt so the parse can't throw on int↔double↔string surprises.
     return CategoryModel(
-      id: map['id'] as String,
-      storeId: map['store_id'] as String,
-      name: map['name'] as String,
-      color: Color(colorInt),
+      id: _asString(map['id']),
+      storeId: _asString(map['store_id']),
+      name: _asString(map['name']),
+      color: Color(_asInt(map['color_value'], 0xFF3B5BDB)),
       icon: IconData(
-        map['icon_code'] as int? ?? Icons.category_rounded.codePoint,
+        _asInt(map['icon_code'], Icons.category_rounded.codePoint),
         fontFamily: 'MaterialIcons',
       ),
-      itemCount: map['item_count'] as int? ?? 0,
+      itemCount: _asInt(map['item_count'], 0),
     );
   }
 
@@ -234,12 +275,28 @@ class InventoryService {
           .eq('store_id', storeId)
           .order('created_at', ascending: false);
 
-      final items = (response as List)
-          .map((m) => InventoryItem.fromMap(m as Map<String, dynamic>))
-          .toList();
+      // Per-row try/catch: a single corrupt row must NOT blank the entire
+      // list. Previously, `(response as List).map(...).toList()` would throw
+      // on the first row that failed to parse (e.g. low_stock_threshold cast)
+      // and the outer catch would return []. The user then saw "no items"
+      // even though items existed in the DB — this is the second face of the
+      // same bug as the "Create failed" toast on Android.
+      final items = <InventoryItem>[];
+      var parseFailures = 0;
+      for (final raw in (response as List)) {
+        try {
+          items.add(InventoryItem.fromMap(raw as Map<String, dynamic>));
+        } catch (e) {
+          parseFailures++;
+          debugPrint(
+            '[InventoryService] fetchItems — parse FAILED for row: $raw — $e',
+          );
+        }
+      }
       debugPrint(
         '[InventoryService] fetchItems — returned ${items.length} item(s) '
-        'for store_id: "$storeId" (user_id: ${user?.id ?? "null"})',
+        '(${parseFailures} skipped) for store_id: "$storeId" '
+        '(user_id: ${user?.id ?? "null"})',
       );
       return items;
     } catch (e) {
@@ -601,6 +658,12 @@ class InventoryService {
   // ─── Categories ───────────────────────────────────────────────────────────
 
   Future<List<CategoryModel>> fetchCategories(String storeId) async {
+    if (storeId.isEmpty) {
+      debugPrint(
+        '[InventoryService] fetchCategories — ABORT: storeId is EMPTY.',
+      );
+      return [];
+    }
     try {
       // Fetch categories and compute item_count from inventory_items
       final response = await _client
@@ -609,9 +672,25 @@ class InventoryService {
           .eq('store_id', storeId)
           .order('name', ascending: true);
 
-      final cats = (response as List)
-          .map((m) => CategoryModel.fromMap(m as Map<String, dynamic>))
-          .toList();
+      // Per-row try/catch — same defense as fetchItems.
+      final cats = <CategoryModel>[];
+      var parseFailures = 0;
+      for (final raw in (response as List)) {
+        try {
+          cats.add(CategoryModel.fromMap(raw as Map<String, dynamic>));
+        } catch (e) {
+          parseFailures++;
+          debugPrint(
+            '[InventoryService] fetchCategories — parse FAILED for row: $raw — $e',
+          );
+        }
+      }
+      if (parseFailures > 0) {
+        debugPrint(
+          '[InventoryService] fetchCategories — skipped $parseFailures '
+          'unparseable row(s) for store_id "$storeId"',
+        );
+      }
 
       // Compute item counts from inventory_items
       if (cats.isNotEmpty) {
@@ -623,7 +702,7 @@ class InventoryService {
 
           final countMap = <String, int>{};
           for (final row in (countResponse as List)) {
-            final cat = row['category'] as String? ?? '';
+            final cat = _asString(row['category']);
             if (cat.isNotEmpty) {
               countMap[cat] = (countMap[cat] ?? 0) + 1;
             }
@@ -631,21 +710,39 @@ class InventoryService {
           for (final cat in cats) {
             cat.itemCount = countMap[cat.name] ?? 0;
           }
-        } catch (_) {
+        } catch (e) {
+          debugPrint(
+            '[InventoryService] fetchCategories — count query FAILED: $e',
+          );
           // item_count stays 0 if count query fails
         }
       }
 
       return cats;
     } catch (e) {
+      debugPrint('[InventoryService] fetchCategories — error: $e');
       return [];
     }
   }
 
   Future<CategoryModel?> createCategory(CategoryModel cat) async {
-    if (cat.storeId.isEmpty) return null;
+    lastError = null;
+    if (cat.storeId.isEmpty) {
+      lastError = 'Cannot create category without a store.';
+      debugPrint('[InventoryService] createCategory — REJECT: $lastError');
+      return null;
+    }
     final trimmedName = cat.name.trim();
-    if (trimmedName.isEmpty || trimmedName.length > 60) return null;
+    if (trimmedName.isEmpty) {
+      lastError = 'Category name cannot be empty.';
+      debugPrint('[InventoryService] createCategory — REJECT: $lastError');
+      return null;
+    }
+    if (trimmedName.length > 60) {
+      lastError = 'Category name is too long (max 60 characters).';
+      debugPrint('[InventoryService] createCategory — REJECT: $lastError');
+      return null;
+    }
     try {
       final response = await _client
           .from('categories')
@@ -653,9 +750,18 @@ class InventoryService {
           .select()
           .single();
 
-      return CategoryModel.fromMap(response);
+      final created = CategoryModel.fromMap(response);
+      debugPrint(
+        '[InventoryService] createCategory — OK: id="${created.id}" '
+        'store_id="${created.storeId}" name="${created.name}"',
+      );
+      return created;
     } catch (e) {
       lastError = e.toString();
+      debugPrint(
+        '[InventoryService] createCategory — EXCEPTION '
+        'store_id="${cat.storeId}" name="${cat.name}" — $e',
+      );
       return null;
     }
   }

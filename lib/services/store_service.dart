@@ -17,13 +17,15 @@ class StoreModel {
   });
 
   factory StoreModel.fromMap(Map<String, dynamic> map) {
+    final rawCreated = map['created_at'];
+    final createdAt = rawCreated is String && rawCreated.isNotEmpty
+        ? (DateTime.tryParse(rawCreated) ?? DateTime.now())
+        : DateTime.now();
     return StoreModel(
-      id: map['id'] as String,
-      name: map['name'] as String,
-      ownerId: map['owner_id'] as String,
-      createdAt: map['created_at'] != null
-          ? DateTime.parse(map['created_at'] as String)
-          : DateTime.now(),
+      id: map['id']?.toString() ?? '',
+      name: map['name']?.toString() ?? '',
+      ownerId: map['owner_id']?.toString() ?? '',
+      createdAt: createdAt,
     );
   }
 }
@@ -56,16 +58,18 @@ class StoreMember {
 
   factory StoreMember.fromMap(Map<String, dynamic> map) {
     final profile = map['user_profiles'] as Map<String, dynamic>?;
+    final rawCreated = map['created_at'];
+    final createdAt = rawCreated is String && rawCreated.isNotEmpty
+        ? (DateTime.tryParse(rawCreated) ?? DateTime.now())
+        : DateTime.now();
     return StoreMember(
-      id: map['id'] as String,
-      storeId: map['store_id'] as String,
-      userId: map['user_id'] as String,
-      role: map['role'] as String,
+      id: map['id']?.toString() ?? '',
+      storeId: map['store_id']?.toString() ?? '',
+      userId: map['user_id']?.toString() ?? '',
+      role: map['role']?.toString() ?? 'Staff',
       isActive: map['is_active'] as bool? ?? true,
-      invitedBy: map['invited_by'] as String?,
-      createdAt: map['created_at'] != null
-          ? DateTime.parse(map['created_at'] as String)
-          : DateTime.now(),
+      invitedBy: map['invited_by']?.toString(),
+      createdAt: createdAt,
       userName: profile?['full_name'] as String?,
       userEmail: profile?['email'] as String?,
     );
