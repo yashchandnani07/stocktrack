@@ -1,0 +1,37 @@
+import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import type { ComponentProps, ReactNode } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from "react-native";
+import { useStockTrack } from "@/src/providers/stocktrack-provider";
+import type { SyncOverview } from "@/src/lib/types";
+
+type IconName = ComponentProps<typeof MaterialIcons>["name"];
+export const palette = { background: "#F6F8FC", paper: "#FFFFFF", ink: "#172033", slate: "#667085", indigo: "#243B78", blue: "#3568D4", green: "#138A5B", red: "#C93E43", amber: "#B7791F", border: "#E4E7EC", subtle: "#EEF2F8", purple: "#7651B5", teal: "#087F8C" } as const;
+
+export function AppIcon({ name, size = 22, color = palette.ink }: { name: IconName; size?: number; color?: string }) { return <MaterialIcons name={name} size={size} color={color} />; }
+export function AppText({ children, size = 15, weight = "400", color = palette.ink, style, ...props }: TextProps & { children: ReactNode; size?: number; weight?: "400" | "500" | "600" | "700"; color?: string }) { const { fontScale } = useStockTrack(); return <Text {...props} style={[{ color, fontSize: size * fontScale, lineHeight: Math.ceil(size * fontScale * 1.38), fontWeight: weight }, style]}>{children}</Text>; }
+
+export function ScreenTitle({ title, subtitle, action }: { title: string; subtitle?: string; action?: ReactNode }) { return <View style={styles.header}><View style={{ flex: 1, gap: 2 }}><AppText size={25} weight="700">{title}</AppText>{subtitle ? <AppText size={13} color={palette.slate}>{subtitle}</AppText> : null}</View>{action}</View>; }
+
+export function IconButton({ icon, label, onPress, color = palette.ink, disabled = false }: { icon: IconName; label: string; onPress: () => void; color?: string; disabled?: boolean }) { return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.iconButton, pressed && !disabled && { opacity: 0.6 }, disabled && { opacity: 0.35 }]}><AppIcon name={icon} color={color} /></Pressable>; }
+
+export function PrimaryButton({ label, onPress, secondary = false, disabled = false, loading = false, icon }: { label: string; onPress: () => void; secondary?: boolean; disabled?: boolean; loading?: boolean; icon?: IconName }) { return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled || loading} onPress={onPress} style={({ pressed }) => [styles.button, secondary ? styles.secondaryButton : styles.primaryButton, (disabled || loading) && { opacity: 0.48 }, pressed && !(disabled || loading) && { transform: [{ scale: 0.98 }], opacity: 0.92 }]}>{loading ? <ActivityIndicator color={secondary ? palette.indigo : palette.paper} /> : <>{icon ? <AppIcon name={icon} size={19} color={secondary ? palette.indigo : palette.paper} /> : null}<AppText size={15} weight="700" color={secondary ? palette.indigo : palette.paper}>{label}</AppText></>}</Pressable>; }
+
+export function OutlineButton({ label, onPress, icon, color = palette.indigo }: { label: string; onPress: () => void; icon?: IconName; color?: string }) { return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [styles.outlineButton, pressed && { opacity: 0.65 }]}>{icon ? <AppIcon name={icon} size={18} color={color} /> : null}<AppText size={14} weight="700" color={color}>{label}</AppText></Pressable>; }
+
+export function Field({ label, error, style, ...props }: TextInputProps & { label: string; error?: string; style?: ViewStyle }) { const { fontScale } = useStockTrack(); return <View style={[styles.field, style]}><AppText size={13} weight="600" color={palette.slate}>{label}</AppText><TextInput placeholderTextColor="#98A2B3" style={[styles.input, { fontSize: 16 * fontScale }, error && { borderColor: palette.red }]} {...props} /><>{error ? <AppText size={12} color={palette.red}>{error}</AppText> : null}</></View>; }
+
+export function Card({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) { return <View style={[styles.card, style]}>{children}</View>; }
+export function EmptyState({ icon, title, body, action }: { icon: IconName; title: string; body: string; action?: ReactNode }) { return <View style={styles.empty}><View style={styles.emptyIcon}><AppIcon name={icon} size={29} color={palette.blue} /></View><AppText size={18} weight="700" style={{ textAlign: "center" }}>{title}</AppText><AppText size={14} color={palette.slate} style={{ textAlign: "center", maxWidth: 290 }}>{body}</AppText>{action}</View>; }
+
+export function SyncChip({ sync, onPress }: { sync: SyncOverview; onPress: () => void }) { const config = sync.state === "offline" ? { label: "Offline", color: palette.amber, icon: "cloud-off" as IconName } : sync.state === "syncing" ? { label: "Syncing", color: palette.blue, icon: "sync" as IconName } : sync.state === "failed" ? { label: `${sync.failedCount} failed`, color: palette.red, icon: "error-outline" as IconName } : sync.state === "pending" ? { label: `${sync.pendingCount} pending`, color: palette.amber, icon: "cloud-upload" as IconName } : { label: "Synced", color: palette.green, icon: "cloud-done" as IconName };
+  return <Pressable accessibilityRole="button" accessibilityLabel={`Synchronization status: ${config.label}`} onPress={onPress} style={({ pressed }) => [styles.syncChip, { backgroundColor: `${config.color}16` }, pressed && { opacity: 0.65 }]}><AppIcon name={config.icon} size={16} color={config.color} /><AppText size={12} weight="700" color={config.color}>{config.label}</AppText></Pressable>;
+}
+
+export function SectionLabel({ children }: { children: string }) { return <AppText size={12} weight="700" color={palette.slate} style={{ letterSpacing: 0.7, textTransform: "uppercase", marginTop: 8 }}>{children}</AppText>; }
+
+const styles = StyleSheet.create({
+  header: { flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 12 }, iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: palette.paper, borderWidth: 1, borderColor: palette.border },
+  button: { minHeight: 48, paddingHorizontal: 18, borderRadius: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 }, primaryButton: { backgroundColor: palette.indigo }, secondaryButton: { backgroundColor: "#EEF2FF" }, outlineButton: { minHeight: 42, borderWidth: 1, borderColor: "#C7D2FE", borderRadius: 12, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, backgroundColor: palette.paper },
+  field: { gap: 6 }, input: { minHeight: 50, backgroundColor: palette.paper, borderWidth: 1, borderColor: palette.border, borderRadius: 13, paddingHorizontal: 14, color: palette.ink }, card: { backgroundColor: palette.paper, borderWidth: 1, borderColor: palette.border, borderRadius: 16, padding: 15, gap: 10 }, empty: { alignItems: "center", justifyContent: "center", paddingVertical: 48, paddingHorizontal: 18, gap: 10 }, emptyIcon: { width: 58, height: 58, alignItems: "center", justifyContent: "center", borderRadius: 29, backgroundColor: "#E6EEFE", marginBottom: 4 },
+  syncChip: { minHeight: 34, borderRadius: 17, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 5, alignSelf: "flex-start" },
+});
